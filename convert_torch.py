@@ -68,6 +68,26 @@ def lua_recursive_model(module,seq):
         elif name == 'ReLU':
             n = nn.ReLU()
             add_submodule(seq,n)
+        #add by sheen start
+        elif name == 'LeakyReLU':
+            n = nn.LeakyReLU(m.negval)
+            add_submodule(seq,n)
+        elif name == 'Tanh':
+            n = nn.Tanh()
+            add_submodule(seq,n)
+        elif name == 'MulConstant':
+            n = Lambda(lambda x,c=m.constant_scalar: x * c)
+            add_submodule(seq,n)
+        elif name == 'nn.ShaveImage':
+            n = nn.ZeroPad2d((-2,-2,-2,-2))
+            add_submodule(seq,n)
+        elif name == 'nn.InstanceNormalization':
+            n = nn.InstanceNorm2d(m.nOutput, m.eps)
+            add_submodule(seq,n)
+        elif name == 'nn.TotalVariation':
+            n = Lambda(lambda x: x) # do nothing
+            add_submodule(seq,n)
+        #add by sheen end
         elif name == 'SpatialMaxPooling':
             n = nn.MaxPool2d((m.kW,m.kH),(m.dW,m.dH),(m.padW,m.padH),ceil_mode=m.ceil_mode)
             add_submodule(seq,n)
@@ -75,8 +95,13 @@ def lua_recursive_model(module,seq):
             n = nn.AvgPool2d((m.kW,m.kH),(m.dW,m.dH),(m.padW,m.padH),ceil_mode=m.ceil_mode)
             add_submodule(seq,n)
         elif name == 'SpatialUpSamplingNearest':
-            n = nn.UpsamplingNearest2d(scale_factor=m.scale_factor)
+            n = nn.Upsample(scale_factor=m.scale_factor)
             add_submodule(seq,n)
+        #add by sheen start
+        elif name == 'nn.SpatialUpSamplingBilinear':
+            n = nn.Upsample(scale_factor=m.scale_factor)
+            add_submodule(seq,n)
+        #end by sheen end
         elif name == 'View':
             n = Lambda(lambda x: x.view(x.size(0),-1))
             add_submodule(seq,n)
@@ -127,6 +152,13 @@ def lua_recursive_model(module,seq):
             n = LambdaMap(lambda x: x)
             lua_recursive_model(m,n)
             add_submodule(seq,n)
+#        add by sheen start
+        elif name == 'JoinTable':
+            dim = m.dimension
+            n = LambdaReduce(lambda x,y,dim=dim: torch.cat((x,y),1))
+#            lua_recursive_model(m,n)
+            add_submodule(seq,n)
+#        add by sheen end
         elif name == 'CAddTable': # input is list
             n = LambdaReduce(lambda x,y: x+y)
             add_submodule(seq,n)
@@ -139,7 +171,6 @@ def lua_recursive_model(module,seq):
             print('Not Implement',name,real._typename)
         else:
             print('Not Implement',name)
-
 
 def lua_recursive_source(module):
     s = []
@@ -158,12 +189,35 @@ def lua_recursive_source(module):
             s += ['nn.BatchNorm2d({},{},{},{}),#BatchNorm2d'.format(m.running_mean.size(0), m.eps, m.momentum, m.affine)]
         elif name == 'ReLU':
             s += ['nn.ReLU()']
+        #add by sheen start
+        elif name == 'LeakyReLU':
+            s += ['nn.LeakyReLU({})'.format(m.negval)]
+        elif name == 'Tanh':
+            s += ['nn.Tanh()']
+        elif name == 'MulConstant':
+#            print_all(m)
+            s += ['Lambda(lambda x,c={}: x*c)'.format(m.constant_scalar)]
+        elif name == 'nn.ShaveImage':
+            #SpatialZeroPadding
+#            print_all(nn)
+            s += ['nn.ZeroPad2d({})'.format(-2)]
+        elif name == 'nn.InstanceNormalization':
+            print(m.nOutput, m.eps, m.momentum, m.affine)
+            print_all(m)
+            s += ['nn.InstanceNorm2d({},{}),#InstanceNorm2d'.format(m.nOutput, m.eps)]
+        elif name == 'nn.TotalVariation': 
+            s += ['Lambda(lambda x: x), # nn.TotalVariation']
+        #add by sheen end
         elif name == 'SpatialMaxPooling':
             s += ['nn.MaxPool2d({},{},{},ceil_mode={}),#MaxPool2d'.format((m.kW,m.kH),(m.dW,m.dH),(m.padW,m.padH),m.ceil_mode)]
         elif name == 'SpatialAveragePooling':
             s += ['nn.AvgPool2d({},{},{},ceil_mode={}),#AvgPool2d'.format((m.kW,m.kH),(m.dW,m.dH),(m.padW,m.padH),m.ceil_mode)]
         elif name == 'SpatialUpSamplingNearest':
-            s += ['nn.UpsamplingNearest2d(scale_factor={})'.format(m.scale_factor)]
+            s += ['nn.Upsample(scale_factor={})'.format(m.scale_factor)]
+        #add by sheen start
+        elif name == 'nn.SpatialUpSamplingBilinear':
+            s += ['nn.Upsample(scale_factor={})'.format(m.scale_factor)]
+        #add by sheen end
         elif name == 'View':
             s += ['Lambda(lambda x: x.view(x.size(0),-1)), # View']
         elif name == 'Reshape':
@@ -201,6 +255,14 @@ def lua_recursive_source(module):
             s += ['LambdaMap(lambda x: x, # ConcatTable']
             s += lua_recursive_source(m)
             s += [')']
+        #add by sheen start
+        elif name == 'JoinTable':
+            dim = m.dimension
+            s += ['LambdaReduce(lambda x,y,dim={}: torch.cat((x,y),dim), # JoinTable'.format(1)]
+#            s += ['torch.cat((x,y),dim), # JoinTable']
+#            s += lua_recursive_source(m)
+            s += [')']
+        #add by sheen end
         elif name == 'CAddTable':
             s += ['LambdaReduce(lambda x,y: x+y), # CAddTable']
         elif name == 'Concat':
@@ -212,6 +274,15 @@ def lua_recursive_source(module):
             s += '# ' + name + ' Not Implement,\n'
     s = map(lambda x: '\t{}'.format(x),s)
     return s
+
+import sys
+def print_all(obj):
+    modulelist = dir(obj)
+    length = len(modulelist)
+    print('=================1')
+    for i in range(0,length,1):
+        print(modulelist[i])
+    print('=================2')
 
 def simplify_source(s):
     s = map(lambda x: x.replace(',(1, 1),(0, 0),1,1,bias=True),#Conv2d',')'),s)
